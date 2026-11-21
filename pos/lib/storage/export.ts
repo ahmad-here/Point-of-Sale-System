@@ -1,10 +1,22 @@
 /**
  * Data Export Module
- * Handles exporting all system data to a JSON file for backup
+ * Handles exporting all system data to JSON (full backup) or CSV (per module)
  */
 
 import Database from './database';
 import { ExportedData } from './types';
+
+function download(content: string, type: string, filename: string) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
 
 export class DataExporter {
   /**
@@ -12,144 +24,112 @@ export class DataExporter {
    */
   static generateExport(): ExportedData {
     const data = Database.getAllData();
-    const products = data.products;
-    const sales = data.sales;
-    const payments = data.payments;
-    const customers = data.customers;
+    const totalRevenue = data.payments.reduce((sum, p) => (p.status === 'Completed' ? sum + p.amount : sum), 0);
 
-    // Calculate metadata
-    const totalRevenue = payments.reduce((sum, p) => {
-      if (p.status === 'Completed') return sum + p.amount;
-      return sum;
-    }, 0);
-
-    const exportedData: ExportedData = {
-      version: '1.0.0',
+    return {
+      version: '1.1.0',
       exportedAt: Date.now(),
       exportedBy: data.settings.businessName,
       ...data,
       metadata: {
-        totalProducts: products.length,
-        totalSales: sales.length,
-        totalPayments: payments.length,
-        totalCustomers: customers.length,
+        totalProducts: data.products.length,
+        totalSales: data.sales.length,
+        totalPayments: data.payments.length,
+        totalCustomers: data.customers.length,
         totalRevenue,
       },
     };
-
-    return exportedData;
   }
 
   /**
    * Export data as JSON file
    */
   static downloadAsJSON(): void {
-    const exportData = this.generateExport();
-    const jsonString = JSON.stringify(exportData, null, 2);
-    const blob = new Blob([jsonString], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
+    const json = JSON.stringify(this.generateExport(), null, 2);
+    download(json, 'application/json', `pos-backup-${new Date().toISOString().split('T')[0]}.json`);
+  }
 
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `pos-backup-${new Date().toISOString().split('T')[0]}.json`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+  /**
+   * Escape a value for CSV (RFC 4180) and neutralise spreadsheet formula injection
+   */
+  static csvCell(value: unknown): string {
+    let s = value === undefined || value === null ? '' : String(value);
+    if (/^[=+\-@]/.test(s) && Number.isNaN(Number(s))) s = `'${s}`;
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  }
+
+  static toCSV(headers: string[], rows: unknown[][]): string {
+    return [headers, ...rows].map(r => r.map(c => this.csvCell(c)).join(',')).join('\n') + '\n';
   }
 
   /**
    * Export data as CSV (for specific modules)
    */
   static downloadAsCSV(type: 'products' | 'sales' | 'payments' | 'customers'): void {
-    let csvContent = '';
-    let filename = '';
+    const day = new Date().toISOString().split('T')[0];
+    let csv = '';
 
     switch (type) {
       case 'products': {
-        const products = Database.getProducts();
-        csvContent = 'ID,Name,SKU,Category,Quantity,Reorder Level,Price,Status,Created At\n';
-        products.forEach(p => {
-          csvContent += `${p.id},"${p.name}",${p.sku},${p.categoryId},${p.quantity},${p.reorder},${p.price},"${p.status}",${new Date(p.createdAt).toISOString()}\n`;
-        });
-        filename = `products-backup-${new Date().toISOString().split('T')[0]}.csv`;
+        const categories = Database.getCategories();
+        // Header names match the inventory CSV importer so the file can be re-imported
+        csv = this.toCSV(
+          ['name', 'sku', 'category', 'quantity', 'price', 'reorderlevel', 'status'],
+          Database.getProducts().map(p => [
+            p.name,
+            p.sku,
+            categories.find(c => c.id === p.categoryId)?.name || '',
+            p.quantity,
+            p.price,
+            p.reorder,
+            p.status,
+          ])
+        );
         break;
       }
-
-      case 'sales': {
-        const sales = Database.getSales();
-        csvContent = 'ID,Order ID,Customer,Items Count,Total,Date,Status,Phone\n';
-        sales.forEach(s => {
-          csvContent += `${s.id},"${s.orderId}","${s.customer}",${s.items},${s.total},"${s.date}","${s.status}","${s.phoneNumber || 'N/A'}"\n`;
-        });
-        filename = `sales-backup-${new Date().toISOString().split('T')[0]}.csv`;
+      case 'sales':
+        csv = this.toCSV(
+          ['Order ID', 'Date', 'Customer', 'Phone', 'Items', 'Subtotal', 'Discount', 'Tax', 'Total', 'Payment Method', 'Status'],
+          Database.getSales().map(s => [
+            s.orderId,
+            s.date,
+            s.customer,
+            s.phoneNumber || '',
+            s.items,
+            s.subtotal ?? s.total,
+            s.discount ?? 0,
+            s.tax ?? 0,
+            s.total,
+            s.paymentMethod || '',
+            s.status,
+          ])
+        );
         break;
-      }
-
-      case 'payments': {
-        const payments = Database.getPayments();
-        csvContent = 'ID,Order ID,Amount,Method,Status,Date,Customer Name,Phone\n';
-        payments.forEach(p => {
-          csvContent += `"${p.id}","${p.orderId}",${p.amount},"${p.method}","${p.status}","${p.date}","${p.customerName || 'N/A'}","${p.phoneNumber || 'N/A'}"\n`;
-        });
-        filename = `payments-backup-${new Date().toISOString().split('T')[0]}.csv`;
+      case 'payments':
+        csv = this.toCSV(
+          ['Payment ID', 'Order ID', 'Date', 'Amount', 'Method', 'Status', 'Customer', 'Phone', 'Notes'],
+          Database.getPayments().map(p => [
+            p.id,
+            p.orderId,
+            p.date,
+            p.amount,
+            p.method,
+            p.status,
+            p.customerName || '',
+            p.phoneNumber || '',
+            p.notes || '',
+          ])
+        );
         break;
-      }
-
-      case 'customers': {
-        const customers = Database.getCustomers();
-        csvContent = 'ID,Name,Email,Phone,Address,Total Purchases,Total Spent\n';
-        customers.forEach(c => {
-          csvContent += `${c.id},"${c.name}","${c.email}","${c.phone}","${c.address || 'N/A'}",${c.totalPurchases},${c.totalSpent}\n`;
-        });
-        filename = `customers-backup-${new Date().toISOString().split('T')[0]}.csv`;
+      case 'customers':
+        csv = this.toCSV(
+          ['Name', 'Phone', 'Email', 'Address', 'Purchases', 'Total Spent'],
+          Database.getCustomers().map(c => [c.name, c.phone, c.email, c.address || '', c.totalPurchases, c.totalSpent])
+        );
         break;
-      }
     }
 
-    const blob = new Blob([csvContent], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  }
-
-  /**
-   * Export all data as ZIP (requires additional library)
-   * This is a placeholder for future implementation
-   */
-  static async downloadAsZip(): Promise<void> {
-    const exportData = this.generateExport();
-    console.log('ZIP export would include all data');
-    console.log('Requires jszip library for implementation');
-    // Implementation would require jszip library
-    // For now, use downloadAsJSON
-    this.downloadAsJSON();
-  }
-
-  /**
-   * Get export preview
-   */
-  static getExportPreview(): {
-    summary: string;
-    items: { label: string; count: number }[];
-  } {
-    const exportData = this.generateExport();
-    const items = [
-      { label: 'Products', count: exportData.metadata.totalProducts },
-      { label: 'Sales', count: exportData.metadata.totalSales },
-      { label: 'Payments', count: exportData.metadata.totalPayments },
-      { label: 'Customers', count: exportData.metadata.totalCustomers },
-    ];
-
-    return {
-      summary: `Total Revenue: $${exportData.metadata.totalRevenue.toFixed(2)} | ${exportData.metadata.totalSales} Sales`,
-      items,
-    };
+    download(csv, 'text/csv;charset=utf-8', `${type}-${day}.csv`);
   }
 }
 

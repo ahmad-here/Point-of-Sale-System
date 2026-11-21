@@ -21,10 +21,6 @@ ChartJS.register(
   Legend
 );
 
-interface Product {
-  id: number;
-  category: string;
-}
 
 interface SaleItem {
   name: string;
@@ -40,9 +36,8 @@ interface Sale {
 }
 
 const getCategoryData = (sales: Sale[], period: '24hours' | '7days' | 'month' | '6months' | 'alltime') => {
-  const now = new Date();
-  let startDate = new Date();
-  let categoryRevenue: { [key: string]: number } = {};
+  const startDate = new Date();
+  const categoryRevenue: { [key: string]: number } = {};
 
   if (period === '24hours') {
     startDate.setHours(startDate.getHours() - 24);
@@ -79,9 +74,11 @@ const getCategoryData = (sales: Sale[], period: '24hours' | '7days' | 'month' | 
 export default function SalesByCategoryChart({
   heading,
   sales = [],
+  formatMoney = (n: number) => n.toLocaleString(),
 }: {
   heading: string;
   sales?: Sale[];
+  formatMoney?: (n: number) => string;
 }) {
   const [timePeriod, setTimePeriod] = useState<'24hours' | '7days' | 'month' | '6months' | 'alltime'>(
     'alltime'
@@ -95,7 +92,7 @@ export default function SalesByCategoryChart({
     labels: chartDatasets.labels,
     datasets: [
       {
-        label: 'Sales ($)',
+        label: 'Sales',
         data: chartDatasets.data,
         backgroundColor: [
           '#eb5e28',
@@ -112,12 +109,10 @@ export default function SalesByCategoryChart({
     ],
   };
 
-  const maxSales = Math.max(...chartDatasets.data, 25000);
-
   const options = {
     indexAxis: 'y' as const,
     responsive: true,
-    maintainAspectRatio: true,
+    maintainAspectRatio: false,
     plugins: {
       legend: {
         display: true,
@@ -140,8 +135,8 @@ export default function SalesByCategoryChart({
         padding: 12,
         displayColors: false,
         callbacks: {
-          label: function (context: any) {
-            return '$' + (context.parsed.x as number).toLocaleString();
+          label: function (context: { parsed: { x: number | null } }) {
+            return formatMoney(context.parsed.x ?? 0);
           },
         },
       },
@@ -149,11 +144,11 @@ export default function SalesByCategoryChart({
     scales: {
       x: {
         beginAtZero: true,
-        max: maxSales * 1.1,
+        suggestedMax: 10,
         ticks: {
           color: '#403d39',
           callback: function (value: number | string) {
-            return '$' + (value as number).toLocaleString();
+            return formatMoney(Number(value));
           },
         },
         grid: {
@@ -177,9 +172,10 @@ export default function SalesByCategoryChart({
 
   return (
     <div className="w-full">
-      <div className="flex justify-between mb-4">
-        <h3 className='text-lg font-semibold text-[#252422] mb-4'>{heading}</h3>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-lg font-semibold text-[#252422]">{heading}</h3>
         <select
+          aria-label="Time period"
           value={timePeriod}
           onChange={(e) => setTimePeriod(e.target.value as '24hours' | '7days' | 'month' | '6months' | 'alltime')}
           className="px-4 py-2 bg-white border border-[#ccc5b9] rounded-lg text-[#252422] font-medium text-sm hover:border-[#eb5e28] focus:outline-none focus:ring-2 focus:ring-[#eb5e28] focus:border-transparent"

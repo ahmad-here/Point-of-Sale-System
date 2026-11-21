@@ -35,9 +35,9 @@ interface Sale {
 
 const getRevenueData = (sales: Sale[], period: '24hours' | '7days' | 'month' | '6months' | 'alltime') => {
   const now = new Date();
-  let startDate = new Date();
-  let labels: string[] = [];
-  let groupedData: { [key: string]: number } = {};
+  const startDate = new Date();
+  const labels: string[] = [];
+  const groupedData: { [key: string]: number } = {};
 
   if (period === '24hours') {
     startDate.setHours(startDate.getHours() - 24);
@@ -110,17 +110,24 @@ const getRevenueData = (sales: Sale[], period: '24hours' | '7days' | 'month' | '
       }
     });
   } else {
-    // alltime
+    // alltime: one point per calendar month (year-aware) from the first sale until now
     const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    monthNames.forEach((month) => {
-      labels.push(month);
-      groupedData[month] = 0;
-    });
+    const first = sales.length ? new Date(Math.min(...sales.map(s => s.createdAt))) : new Date(now);
+    const cursor = new Date(first.getFullYear(), first.getMonth(), 1);
+    if ((now.getFullYear() - cursor.getFullYear()) * 12 + now.getMonth() - cursor.getMonth() < 5) {
+      cursor.setFullYear(now.getFullYear(), now.getMonth() - 5, 1);
+    }
+    while (cursor <= now) {
+      const label = `${monthNames[cursor.getMonth()]} ${String(cursor.getFullYear()).slice(2)}`;
+      labels.push(label);
+      groupedData[label] = 0;
+      cursor.setMonth(cursor.getMonth() + 1);
+    }
 
     sales.forEach((sale) => {
-      const saleDate = new Date(sale.createdAt);
-      const monthName = monthNames[saleDate.getMonth()];
-      groupedData[monthName] = (groupedData[monthName] || 0) + sale.total;
+      const d = new Date(sale.createdAt);
+      const label = `${monthNames[d.getMonth()]} ${String(d.getFullYear()).slice(2)}`;
+      groupedData[label] = (groupedData[label] || 0) + sale.total;
     });
   }
 
@@ -128,7 +135,15 @@ const getRevenueData = (sales: Sale[], period: '24hours' | '7days' | 'month' | '
   return { labels, data };
 };
 
-export default function RevenueTrendChart({ heading, sales = [] }: { heading: string; sales?: Sale[] }) {
+export default function RevenueTrendChart({
+  heading,
+  sales = [],
+  formatMoney = (n: number) => n.toLocaleString(),
+}: {
+  heading: string;
+  sales?: Sale[];
+  formatMoney?: (n: number) => string;
+}) {
   const [timePeriod, setTimePeriod] = useState<'24hours' | '7days' | 'month' | '6months' | 'alltime'>('alltime');
 
   const chartDatasets = useMemo(() => {
@@ -139,7 +154,7 @@ export default function RevenueTrendChart({ heading, sales = [] }: { heading: st
     labels: chartDatasets.labels,
     datasets: [
       {
-        label: 'Revenue ($)',
+        label: 'Revenue',
         data: chartDatasets.data,
         borderColor: '#eb5e28',
         backgroundColor: 'rgba(235, 94, 40, 0.1)',
@@ -155,11 +170,9 @@ export default function RevenueTrendChart({ heading, sales = [] }: { heading: st
     ],
   };
 
-  const maxRevenue = Math.max(...chartDatasets.data, 50000);
-
   const options = {
     responsive: true,
-    maintainAspectRatio: true,
+    maintainAspectRatio: false,
     plugins: {
       legend: {
         display: true,
@@ -181,16 +194,19 @@ export default function RevenueTrendChart({ heading, sales = [] }: { heading: st
         borderWidth: 1,
         padding: 12,
         displayColors: false,
+        callbacks: {
+          label: (ctx: { parsed: { y: number | null } }) => formatMoney(ctx.parsed.y ?? 0),
+        },
       },
     },
     scales: {
       y: {
         beginAtZero: true,
-        max: maxRevenue * 1.1,
+        suggestedMax: 10,
         ticks: {
           color: '#403d39',
           callback: function (value: number | string) {
-            return '$' + (value as number).toLocaleString();
+            return formatMoney(Number(value));
           },
         },
         grid: {
@@ -211,9 +227,10 @@ export default function RevenueTrendChart({ heading, sales = [] }: { heading: st
 
   return (
     <div className="w-full">
-      <div className="flex justify-between mb-4">
-        <h3 className='text-lg font-semibold text-[#252422] mb-4'>{heading}</h3>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-lg font-semibold text-[#252422]">{heading}</h3>
         <select
+          aria-label="Time period"
           value={timePeriod}
           onChange={(e) => setTimePeriod(e.target.value as '24hours' | '7days' | 'month' | '6months' | 'alltime')}
           className="px-4 py-2 bg-white border border-[#ccc5b9] rounded-lg text-[#252422] font-medium text-sm hover:border-[#eb5e28] focus:outline-none focus:ring-2 focus:ring-[#eb5e28] focus:border-transparent"

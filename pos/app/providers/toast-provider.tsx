@@ -1,5 +1,5 @@
 'use client';
-import React, { createContext, useContext, useState, useCallback } from 'react';
+import React, { createContext, useContext, useState, useCallback, useMemo } from 'react';
 import { Check, AlertCircle, Info, X } from 'lucide-react';
 
 export type ToastType = 'success' | 'error' | 'info' | 'warning';
@@ -22,25 +22,24 @@ const ToastContext = createContext<ToastContextType | undefined>(undefined);
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  const showToast = useCallback((message: string, type: ToastType = 'success', duration = 3000) => {
-    const id = Math.random().toString(36).substr(2, 9);
-    const newToast: Toast = { id, message, type, duration };
-    
-    setToasts(prev => [...prev, newToast]);
-    
-    if (duration > 0) {
-      setTimeout(() => {
-        removeToast(id);
-      }, duration);
-    }
-  }, []);
-
   const removeToast = useCallback((id: string) => {
     setToasts(prev => prev.filter(toast => toast.id !== id));
   }, []);
 
+  const showToast = useCallback(
+    (message: string, type: ToastType = 'success', duration = 3000) => {
+      const id = Math.random().toString(36).slice(2, 11);
+      // Keep at most 4 toasts on screen
+      setToasts(prev => [...prev.slice(-3), { id, message, type, duration }]);
+      if (duration > 0) setTimeout(() => removeToast(id), duration);
+    },
+    [removeToast]
+  );
+
+  const value = useMemo(() => ({ toasts, showToast, removeToast }), [toasts, showToast, removeToast]);
+
   return (
-    <ToastContext.Provider value={{ toasts, showToast, removeToast }}>
+    <ToastContext.Provider value={value}>
       {children}
       <ToastContainer />
     </ToastContext.Provider>
@@ -98,7 +97,7 @@ export function ToastContainer() {
   };
 
   return (
-    <div className="fixed top-6 right-6 z-[9999] space-y-3">
+    <div className="no-print fixed left-4 right-4 top-4 z-[9999] space-y-3 sm:left-auto sm:right-6 sm:top-6 sm:w-96" aria-live="polite">
       {toasts.map(toast => (
         <div
           key={toast.id}

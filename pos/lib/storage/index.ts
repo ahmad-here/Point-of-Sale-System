@@ -1,381 +1,334 @@
 'use client';
 
-import React, {
-    createContext,
-    useContext,
-    useState,
-    useCallback,
-    useEffect,
-    ReactNode,
-} from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect, useMemo, ReactNode } from 'react';
 
-import Database from './database';
+import Database, { DEFAULT_SETTINGS } from './database';
 import DataExporter from './export';
 import DataImporter, { ImportResult } from './import';
 import StorageUtils from './utils';
 
 import {
-    Product,
-    Sale,
-    Payment,
-    Customer,
-    SystemSettings,
-    DataStats,
-    Category
+  Product,
+  Sale,
+  Payment,
+  Customer,
+  SystemSettings,
+  DataStats,
+  Category,
+  CompleteSaleInput,
+  CompleteSaleResult,
 } from './types';
 
+type NewProduct = Omit<Product, 'id' | 'createdAt' | 'updatedAt' | 'status'>;
+
 export interface DataManagerContextType {
-    products: Product[];
-    addProduct: (product: Omit<Product, 'id' | 'createdAt' | 'updatedAt'>) => Product;
-    updateProduct: (id: number, updates: Partial<Product>) => Product | null;
-    deleteProduct: (id: number) => boolean;
+  /** False until localStorage has been read on the client. Use to avoid empty-state flashes. */
+  ready: boolean;
 
-    categories: Category[];
-    addCategory: (category: Omit<Category, 'id' | 'createdAt' | 'updatedAt'>) => Category;
-    updateCategory: (id: number, updates: Partial<Category>) => Category | null;
-    deleteCategory: (id: number) => boolean;
+  products: Product[];
+  addProduct: (product: NewProduct) => Product;
+  updateProduct: (id: number, updates: Partial<Product>) => Product | null;
+  deleteProduct: (id: number) => boolean;
+  skuExists: (sku: string, exceptId?: number) => boolean;
 
-    sales: Sale[];
-    addSale: (sale: Omit<Sale, 'id' | 'createdAt' | 'updatedAt'>) => Sale;
-    updateSale: (id: number, updates: Partial<Sale>) => Sale | null;
-    deleteSale: (id: number) => boolean;
+  categories: Category[];
+  addCategory: (category: { name: string }) => Category;
+  updateCategory: (id: number, updates: Partial<Category>) => Category | null;
+  deleteCategory: (id: number) => boolean;
 
-    payments: Payment[];
-    addPayment: (payment: Omit<Payment, 'id' | 'createdAt' | 'updatedAt'>) => Payment;
-    updatePayment: (id: string, updates: Partial<Payment>) => Payment | null;
-    deletePayment: (id: string) => boolean;
+  sales: Sale[];
+  addSale: (sale: Omit<Sale, 'id' | 'createdAt' | 'updatedAt'>) => Sale;
+  updateSale: (id: number, updates: Partial<Sale>) => Sale | null;
+  deleteSale: (id: number) => boolean;
+  completeSale: (input: CompleteSaleInput) => CompleteSaleResult;
+  refundSale: (id: number) => { ok: boolean; error?: string };
 
-    customers: Customer[];
-    addCustomer: (customer: Omit<Customer, 'id' | 'createdAt' | 'updatedAt'>) => Customer;
-    updateCustomer: (id: number, updates: Partial<Customer>) => Customer | null;
-    deleteCustomer: (id: number) => boolean;
+  payments: Payment[];
+  addPayment: (payment: Omit<Payment, 'id' | 'createdAt' | 'updatedAt' | 'timestamp'> & { timestamp?: number }) => Payment;
+  updatePayment: (id: string, updates: Partial<Payment>) => Payment | null;
+  deletePayment: (id: string) => boolean;
+  nextOrderId: () => string;
 
-    settings: SystemSettings;
+  customers: Customer[];
+  addCustomer: (customer: Omit<Customer, 'id' | 'createdAt' | 'updatedAt'>) => Customer;
+  updateCustomer: (id: number, updates: Partial<Customer>) => Customer | null;
+  deleteCustomer: (id: number) => boolean;
 
-    stats: DataStats;
-    refreshStats: () => void;
+  settings: SystemSettings;
+  updateSettings: (updates: Partial<SystemSettings>) => SystemSettings;
 
-    exportData: (
-        format: 'json' | 'csv',
-        type?: 'products' | 'sales' | 'payments' | 'customers'
-    ) => void;
+  stats: DataStats;
+  refreshStats: () => void;
 
-    importData: (file: File) => Promise<ImportResult>;
-    mergeData: (file: File) => Promise<ImportResult>;
-    clearAllData: () => void;
+  exportData: (format: 'json' | 'csv', type?: 'products' | 'sales' | 'payments' | 'customers') => void;
+  importData: (file: File) => Promise<ImportResult>;
+  mergeData: (file: File) => Promise<ImportResult>;
+  clearAllData: () => void;
 
-    lowStockItems: Product[];
-    storageQuota: { used: number; limit: number; percentage: number };
+  lowStockItems: Product[];
+  storageQuota: { used: number; limit: number; percentage: number };
 
-    refreshData: () => void;
+  refreshData: () => void;
 }
 
-const DataManagerContext = createContext<DataManagerContextType | undefined>(
-    undefined
-);
+const DataManagerContext = createContext<DataManagerContextType | undefined>(undefined);
 
 export function DataManagerProvider({ children }: { children: ReactNode }) {
-    const [products, setProducts] = useState<Product[]>([]);
-    const [sales, setSales] = useState<Sale[]>([]);
-    const [payments, setPayments] = useState<Payment[]>([]);
-    const [customers, setCustomers] = useState<Customer[]>([]);
-    const [settings, setSettings] = useState<SystemSettings>(Database.getSettings());
-    const [categories, setCategories] = useState<Category[]>([]);
-    const [stats, setStats] = useState<DataStats>({
-        totalRevenue: 0,
-        totalSales: 0,
-        totalProducts: 0,
-        totalCustomers: 0,
-        completedPayments: 0,
-        pendingPayments: 0,
-    });
+  const [ready, setReady] = useState(false);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [sales, setSales] = useState<Sale[]>([]);
+  const [payments, setPayments] = useState<Payment[]>([]);
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  // Start from defaults so server and first client render match (no hydration mismatch)
+  const [settings, setSettings] = useState<SystemSettings>(DEFAULT_SETTINGS);
+  const [storageQuota, setStorageQuota] = useState({ used: 0, limit: 5242880, percentage: 0 });
 
-    const [lowStockItems, setLowStockItems] = useState<Product[]>([]);
-    const [storageQuota, setStorageQuota] = useState({
-        used: 0,
-        limit: 5242880,
-        percentage: 0,
-    });
+  const refreshData = useCallback(() => {
+    setProducts(Database.getProducts());
+    setCategories(Database.getCategories());
+    setSales(Database.getSales());
+    setPayments(Database.getPayments());
+    setCustomers(Database.getCustomers());
+    setSettings(Database.getSettings());
+    setStorageQuota(StorageUtils.checkStorageQuota());
+  }, []);
 
-    const refreshStats = useCallback(() => {
-        setStats(StorageUtils.getStats());
-        setLowStockItems(StorageUtils.getLowStockItems() as Product[]);
-    }, []);
+  useEffect(() => {
+    // Hydrate from localStorage after mount. Reading it during render would
+    // make the server HTML and first client render disagree.
+    Database.initialize();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    refreshData();
+    setReady(true);
 
-    const refreshData = useCallback(() => {
-        setProducts(Database.getProducts());
-        setSales(Database.getSales());
-        setPayments(Database.getPayments());
-        setCustomers(Database.getCustomers());
-        setSettings(Database.getSettings());
+    // Keep multiple open tabs in sync
+    const onStorage = (e: StorageEvent) => {
+      if (!e.key || e.key.startsWith('pos_') || e.key === 'categories') refreshData();
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [refreshData]);
 
-        const storedCategories = localStorage.getItem('categories');
-        if (storedCategories) {
-            setCategories(JSON.parse(storedCategories));
-        }
+  const stats = useMemo<DataStats>(() => {
+    const completed = payments.filter(p => p.status === 'Completed');
+    return {
+      totalRevenue: completed.reduce((s, p) => s + p.amount, 0),
+      totalSales: sales.length,
+      totalProducts: products.length,
+      totalCustomers: customers.length,
+      completedPayments: completed.length,
+      pendingPayments: payments.filter(p => p.status === 'Pending').length,
+    };
+  }, [payments, sales, products, customers]);
 
-        refreshStats();
-        setStorageQuota(StorageUtils.checkStorageQuota());
-    }, [refreshStats]);
+  const lowStockItems = useMemo(() => products.filter(p => p.status !== 'In Stock'), [products]);
 
-    useEffect(() => {
-        const stored = localStorage.getItem('categories');
-        if (stored) {
-            setCategories(JSON.parse(stored));
-        }
-        Database.initialize();
+  // ---------- helpers that run a DB write then resync state ----------
+  const withProducts = useCallback(<T,>(fn: () => T): T => {
+    const r = fn();
+    setProducts(Database.getProducts());
+    return r;
+  }, []);
+
+  const addProduct = useCallback((p: NewProduct) => withProducts(() => Database.addProduct(p)), [withProducts]);
+  const updateProduct = useCallback(
+    (id: number, u: Partial<Product>) => withProducts(() => Database.updateProduct(id, u)),
+    [withProducts]
+  );
+  const deleteProduct = useCallback((id: number) => withProducts(() => Database.deleteProduct(id)), [withProducts]);
+  const skuExists = useCallback((sku: string, exceptId?: number) => Database.skuExists(sku, exceptId), []);
+
+  const addCategory = useCallback((c: { name: string }) => {
+    const r = Database.addCategory(c.name);
+    setCategories(Database.getCategories());
+    return r;
+  }, []);
+  const updateCategory = useCallback((id: number, u: Partial<Category>) => {
+    const r = Database.updateCategory(id, u);
+    setCategories(Database.getCategories());
+    return r;
+  }, []);
+  const deleteCategory = useCallback((id: number) => {
+    const r = Database.deleteCategory(id);
+    setCategories(Database.getCategories());
+    return r;
+  }, []);
+
+  const addSale = useCallback((s: Omit<Sale, 'id' | 'createdAt' | 'updatedAt'>) => {
+    const r = Database.addSale(s);
+    setSales(Database.getSales());
+    return r;
+  }, []);
+  const updateSale = useCallback((id: number, u: Partial<Sale>) => {
+    const r = Database.updateSale(id, u);
+    setSales(Database.getSales());
+    return r;
+  }, []);
+  const deleteSale = useCallback((id: number) => {
+    const r = Database.deleteSale(id);
+    setSales(Database.getSales());
+    return r;
+  }, []);
+
+  const completeSale = useCallback(
+    (input: CompleteSaleInput) => {
+      try {
+        const r = Database.completeSale(input, Database.getSettings().taxRate);
         refreshData();
-    }, [refreshData]);
+        return r;
+      } catch (e) {
+        return { ok: false as const, error: e instanceof Error ? e.message : 'Could not complete sale.' };
+      }
+    },
+    [refreshData]
+  );
 
-    const addCategory = useCallback(
-        (category: Omit<Category, 'id' | 'createdAt' | 'updatedAt'>): Category => {
-            const newCategory: Category = {
-                id: Date.now(),
-                name: category.name,
-                createdAt: Date.now(),
-            };
+  const refundSale = useCallback(
+    (id: number) => {
+      const r = Database.refundSale(id);
+      refreshData();
+      return r;
+    },
+    [refreshData]
+  );
 
-            setCategories(prev => {
-                const updated = [...prev, newCategory];
-                localStorage.setItem('categories', JSON.stringify(updated));
-                return updated;
-            });
+  const addPayment = useCallback(
+    (p: Omit<Payment, 'id' | 'createdAt' | 'updatedAt' | 'timestamp'> & { timestamp?: number }) => {
+      const r = Database.addPayment({ ...p, timestamp: p.timestamp ?? Date.now() });
+      setPayments(Database.getPayments());
+      return r;
+    },
+    []
+  );
+  const updatePayment = useCallback((id: string, u: Partial<Payment>) => {
+    const r = Database.updatePayment(id, u);
+    setPayments(Database.getPayments());
+    return r;
+  }, []);
+  const deletePayment = useCallback((id: string) => {
+    const r = Database.deletePayment(id);
+    setPayments(Database.getPayments());
+    return r;
+  }, []);
+  const nextOrderId = useCallback(() => Database.nextOrderId(), []);
 
-            return newCategory;
-        },
-        []
-    );
+  const addCustomer = useCallback((c: Omit<Customer, 'id' | 'createdAt' | 'updatedAt'>) => {
+    const r = Database.addCustomer(c);
+    setCustomers(Database.getCustomers());
+    return r;
+  }, []);
+  const updateCustomer = useCallback((id: number, u: Partial<Customer>) => {
+    const r = Database.updateCustomer(id, u);
+    setCustomers(Database.getCustomers());
+    return r;
+  }, []);
+  const deleteCustomer = useCallback((id: number) => {
+    const r = Database.deleteCustomer(id);
+    setCustomers(Database.getCustomers());
+    return r;
+  }, []);
 
-    const updateCategory = useCallback(
-        (id: number, updates: Partial<Category>) => {
-            const updated = categories.map((cat) =>
-                cat.id === id
-                    ? {
-                        ...cat,
-                        ...updates,
-                        updatedAt: Date.now(),
-                    }
-                    : cat
-            );
+  const updateSettings = useCallback((u: Partial<SystemSettings>) => {
+    const r = Database.updateSettings(u);
+    setSettings(r);
+    return r;
+  }, []);
 
-            setCategories(updated);
-            localStorage.setItem('categories', JSON.stringify(updated));
+  const refreshStats = useCallback(() => refreshData(), [refreshData]);
 
-            return updated.find((c) => c.id === id) || null;
-        },
-        [categories]
-    );
+  const exportData = useCallback(
+    (format: 'json' | 'csv', type?: 'products' | 'sales' | 'payments' | 'customers') => {
+      if (format === 'json') DataExporter.downloadAsJSON();
+      else if (type) DataExporter.downloadAsCSV(type);
+    },
+    []
+  );
 
-    const deleteCategory = useCallback(
-        (id: number) => {
-            const updated = categories.filter((cat) => cat.id !== id);
-            setCategories(updated);
-            localStorage.setItem('categories', JSON.stringify(updated));
-            return true;
-        },
-        [categories]
-    );
+  const importData = useCallback(
+    async (file: File) => {
+      const result = await DataImporter.importFromFile(file);
+      if (result.success) refreshData();
+      return result;
+    },
+    [refreshData]
+  );
 
-    const addProduct = useCallback(
-        (product: Omit<Product, 'id' | 'createdAt' | 'updatedAt'>) => {
-            const result = Database.addProduct(product);
-            setProducts(Database.getProducts());
-            refreshStats();
-            return result;
-        },
-        [refreshStats]
-    );
+  const mergeData = useCallback(
+    async (file: File) => {
+      const result = await DataImporter.mergeFromFile(file);
+      if (result.success) refreshData();
+      return result;
+    },
+    [refreshData]
+  );
 
-    const updateProduct = useCallback(
-        (id: number, updates: Partial<Product>) => {
-            const result = Database.updateProduct(id, updates);
-            setProducts(Database.getProducts());
-            refreshStats();
-            return result;
-        },
-        [refreshStats]
-    );
+  const clearAllData = useCallback(() => {
+    Database.clearAllData();
+    Database.initialize();
+    refreshData();
+  }, [refreshData]);
 
-    const deleteProduct = useCallback(
-        (id: number) => {
-            const result = Database.deleteProduct(id);
-            setProducts(Database.getProducts());
-            refreshStats();
-            return result;
-        },
-        [refreshStats]
-    );
+  const value: DataManagerContextType = {
+    ready,
+    products,
+    addProduct,
+    updateProduct,
+    deleteProduct,
+    skuExists,
+    categories,
+    addCategory,
+    updateCategory,
+    deleteCategory,
+    sales,
+    addSale,
+    updateSale,
+    deleteSale,
+    completeSale,
+    refundSale,
+    payments,
+    addPayment,
+    updatePayment,
+    deletePayment,
+    nextOrderId,
+    customers,
+    addCustomer,
+    updateCustomer,
+    deleteCustomer,
+    settings,
+    updateSettings,
+    stats,
+    refreshStats,
+    exportData,
+    importData,
+    mergeData,
+    clearAllData,
+    lowStockItems,
+    storageQuota,
+    refreshData,
+  };
 
-    const addSale = useCallback(
-        (sale: Omit<Sale, 'id' | 'createdAt' | 'updatedAt'>) => {
-            const result = Database.addSale(sale);
-            setSales(Database.getSales());
-            refreshStats();
-            return result;
-        },
-        [refreshStats]
-    );
-
-    const updateSale = useCallback(
-        (id: number, updates: Partial<Sale>) => {
-            const result = Database.updateSale(id, updates);
-            setSales(Database.getSales());
-            refreshStats();
-            return result;
-        },
-        [refreshStats]
-    );
-
-    const deleteSale = useCallback(
-        (id: number) => {
-            const result = Database.deleteSale(id);
-            setSales(Database.getSales());
-            refreshStats();
-            return result;
-        },
-        [refreshStats]
-    );
-
-    const addPayment = useCallback(
-        (payment: Omit<Payment, 'id' | 'createdAt' | 'updatedAt'>) => {
-            const result = Database.addPayment(payment);
-            setPayments(Database.getPayments());
-            refreshStats();
-            return result;
-        },
-        [refreshStats]
-    );
-
-    const updatePayment = useCallback(
-        (id: string, updates: Partial<Payment>) => {
-            const result = Database.updatePayment(id, updates);
-            setPayments(Database.getPayments());
-            refreshStats();
-            return result;
-        },
-        [refreshStats]
-    );
-
-    const deletePayment = useCallback(
-        (id: string) => {
-            const result = Database.deletePayment(id);
-            setPayments(Database.getPayments());
-            refreshStats();
-            return result;
-        },
-        [refreshStats]
-    );
-
-    const addCustomer = useCallback(
-        (customer: Omit<Customer, 'id' | 'createdAt' | 'updatedAt'>) => {
-            const result = Database.addCustomer(customer);
-            setCustomers(Database.getCustomers());
-            return result;
-        },
-        []
-    );
-
-    const updateCustomer = useCallback(
-        (id: number, updates: Partial<Customer>) => {
-            const result = Database.updateCustomer(id, updates);
-            setCustomers(Database.getCustomers());
-            return result;
-        },
-        []
-    );
-
-    const deleteCustomer = useCallback(
-        (id: number) => {
-            const result = Database.deleteCustomer(id);
-            setCustomers(Database.getCustomers());
-            return result;
-        },
-        []
-    );
-
-    const exportData = useCallback(
-        (
-            format: 'json' | 'csv',
-            type?: 'products' | 'sales' | 'payments' | 'customers'
-        ) => {
-            if (format === 'json') {
-                DataExporter.downloadAsJSON();
-            } else if (format === 'csv' && type) {
-                DataExporter.downloadAsCSV(type);
-            }
-        },
-        []
-    );
-
-    const importData = useCallback(async (file: File) => {
-        const result = await DataImporter.importFromFile(file);
-        if (result.success) refreshData();
-        return result;
-    }, [refreshData]);
-
-    const mergeData = useCallback(async (file: File) => {
-        const result = await DataImporter.mergeFromFile(file);
-        if (result.success) refreshData();
-        return result;
-    }, [refreshData]);
-
-    const clearAllData = useCallback(() => {
-        Database.clearAllData();
-
-        localStorage.removeItem('categories');
-        setCategories([]);
-
-        Database.initialize();
-        refreshData();
-    }, [refreshData]);
-
-    return (
-        React.createElement(
-            DataManagerContext.Provider,
-            {
-                value: {
-                    categories,
-                    addCategory,
-                    updateCategory,
-                    deleteCategory,
-                    products,
-                    addProduct,
-                    updateProduct,
-                    deleteProduct,
-                    sales,
-                    addSale,
-                    updateSale,
-                    deleteSale,
-                    payments,
-                    addPayment,
-                    updatePayment,
-                    deletePayment,
-                    customers,
-                    addCustomer,
-                    updateCustomer,
-                    deleteCustomer,
-                    settings,
-                    stats,
-                    refreshStats,
-                    exportData,
-                    importData,
-                    mergeData,
-                    clearAllData,
-                    lowStockItems,
-                    storageQuota,
-                    refreshData,
-                },
-            },
-            children,
-        )
-    );
+  return React.createElement(DataManagerContext.Provider, { value }, children);
 }
+
 export function useDataManager() {
-    const context = useContext(DataManagerContext);
-    if (!context) {
-        throw new Error('useDataManager must be used within DataManagerProvider');
+  const context = useContext(DataManagerContext);
+  if (!context) throw new Error('useDataManager must be used within DataManagerProvider');
+  return context;
+}
+
+/** Currency formatter bound to the store's configured currency. */
+export function useMoney() {
+  const { settings } = useDataManager();
+  return useMemo(() => {
+    let fmt: Intl.NumberFormat;
+    try {
+      fmt = new Intl.NumberFormat(undefined, { style: 'currency', currency: settings.currency || 'USD' });
+    } catch {
+      fmt = new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' });
     }
-    return context;
+    return (n: number) => fmt.format(Number.isFinite(n) ? n : 0);
+  }, [settings.currency]);
 }
 
 export default DataManagerContext;

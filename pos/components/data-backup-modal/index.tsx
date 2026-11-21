@@ -7,7 +7,7 @@
 
 import React, { useState, useRef } from 'react';
 import Button from '@/components/button';
-import { useDataManager } from '@/lib/storage';
+import { useDataManager, useMoney } from '@/lib/storage';
 import { Download, Upload, AlertCircle, CheckCircle, Loader } from 'lucide-react';
 
 interface DataBackupModalProps {
@@ -17,6 +17,7 @@ interface DataBackupModalProps {
 
 export function DataBackupModal({ isOpen, onClose }: DataBackupModalProps) {
   const { exportData, importData, mergeData, stats } = useDataManager();
+  const money = useMoney();
   const [activeTab, setActiveTab] = useState<'export' | 'import'>('export');
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -32,7 +33,7 @@ export function DataBackupModal({ isOpen, onClose }: DataBackupModalProps) {
         text: 'Data exported successfully! File downloading...',
       });
       setTimeout(() => setMessage(null), 3000);
-    } catch (error) {
+    } catch {
       setMessage({
         type: 'error',
         text: 'Failed to export data. Please try again.',
@@ -62,7 +63,7 @@ export function DataBackupModal({ isOpen, onClose }: DataBackupModalProps) {
           text: result.message,
         });
       }
-    } catch (error) {
+    } catch {
       setMessage({
         type: 'error',
         text: 'Failed to import data. Please check the file format.',
@@ -92,7 +93,7 @@ export function DataBackupModal({ isOpen, onClose }: DataBackupModalProps) {
           text: result.message,
         });
       }
-    } catch (error) {
+    } catch {
       setMessage({
         type: 'error',
         text: 'Failed to merge data. Please try again.',
@@ -108,7 +109,9 @@ export function DataBackupModal({ isOpen, onClose }: DataBackupModalProps) {
       if (mergeMode) {
         handleMerge(file);
       } else {
-        handleImport(file);
+        if (confirm('Restoring replaces ALL current data in this browser with the backup. Continue?')) {
+          handleImport(file);
+        }
       }
     }
     if (fileInputRef.current) {
@@ -119,13 +122,15 @@ export function DataBackupModal({ isOpen, onClose }: DataBackupModalProps) {
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-opacity-50 z-50 flex items-center justify-center">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true" aria-label="Data backup and restore">
       <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[80vh] overflow-y-auto">
         {/* Header */}
         <div className="sticky top-0 bg-white border-b p-6 flex justify-between items-center">
           <h2 className="text-2xl font-bold text-gray-900">Data Backup & Restore</h2>
           <button
             onClick={onClose}
+            type="button"
+            aria-label="Close"
             className="text-gray-500 hover:text-gray-700 text-2xl"
           >
             ×
@@ -201,7 +206,7 @@ export function DataBackupModal({ isOpen, onClose }: DataBackupModalProps) {
                 </div>
                 <div className="bg-orange-50 p-4 rounded-lg">
                   <p className="text-sm text-gray-600">Revenue</p>
-                  <p className="text-2xl font-bold text-orange-600">${stats.totalRevenue.toFixed(2)}</p>
+                  <p className="text-2xl font-bold text-orange-600">{money(stats.totalRevenue)}</p>
                 </div>
               </div>
 

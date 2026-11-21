@@ -5,435 +5,329 @@ import { useRouter } from 'next/navigation';
 import Header from '@/components/header';
 import Card from '@/components/card';
 import Button from '@/components/button';
-import { ArrowLeft, Upload } from 'lucide-react';
-import { useInventory } from '../context';
+import { ArrowLeft, Upload, Download, FileSpreadsheet } from 'lucide-react';
 import { useToast } from '@/app/providers/toast-provider';
 import { useDataManager } from '@/lib/storage';
+import Database from '@/lib/storage/database';
 
+const inputCls =
+  'w-full rounded-lg border border-[#ccc5b9] bg-white px-4 py-2 text-[#252422] placeholder-[#403d39]/40 focus:border-[#eb5e28] focus:outline-none focus:ring-1 focus:ring-[#eb5e28]';
+
+/** Minimal RFC 4180 CSV parser (handles quotes, escaped quotes and CRLF). */
+function parseCSV(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = '';
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"' && text[i + 1] === '"') {
+        cell += '"';
+        i++;
+      } else if (ch === '"') quoted = false;
+      else cell += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === ',') {
+      row.push(cell);
+      cell = '';
+    } else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      row.push(cell);
+      if (row.some(c => c.trim() !== '')) rows.push(row);
+      row = [];
+      cell = '';
+    } else cell += ch;
+  }
+  row.push(cell);
+  if (row.some(c => c.trim() !== '')) rows.push(row);
+  return rows;
+}
+
+const TEMPLATE = 'name,sku,category,quantity,price,reorderlevel\nWireless Mouse,WM-001,Electronics,150,24.99,20\n"USB-C Cable, 2m",USB-002,Accessories,300,9.5,50\n';
 
 export default function AddInventory() {
-    const { addCategory, categories } = useDataManager();
-    const router = useRouter();
-    const { addProduct, items } = useInventory();
-    const { showToast } = useToast();
-    const [activeTab, setActiveTab] = useState<'form' | 'csv'>('form');
-    const [formError, setFormError] = useState('');
-    const [csvError, setCsvError] = useState('');
-    const [csvFile, setCsvFile] = useState<File | null>(null);
-    const [newCategoryName, setNewCategoryName] = useState('');
+  const router = useRouter();
+  const { showToast } = useToast();
+  const { addCategory, categories, addProduct, skuExists, settings, refreshData } = useDataManager();
+  const [activeTab, setActiveTab] = useState<'form' | 'csv'>('form');
+  const [formError, setFormError] = useState('');
+  const [csvError, setCsvError] = useState('');
+  const [csvFile, setCsvFile] = useState<File | null>(null);
+  const [csvReport, setCsvReport] = useState<string | null>(null);
+  const [newCategoryName, setNewCategoryName] = useState('');
+  const [isCustomCategory, setIsCustomCategory] = useState(false);
 
-    const [isCustomCategory, setIsCustomCategory] = useState(false);
+  const emptyForm = { name: '', sku: '', categoryId: '', quantity: '', price: '', reorderLevel: '' };
+  const [formData, setFormData] = useState(emptyForm);
 
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+    const { name, value } = e.target;
+    if (name === 'categoryId' && value === 'other') {
+      setIsCustomCategory(true);
+      return;
+    }
+    setFormData(prev => ({ ...prev, [name]: value }));
+    setFormError('');
+  };
 
+  const handleAddCategory = () => {
+    const name = newCategoryName.trim();
+    if (!name) return setFormError('Please enter a category name');
+    if (categories.some(c => c.name.toLowerCase() === name.toLowerCase())) return setFormError('Category already exists');
+    const created = addCategory({ name });
+    setFormData(prev => ({ ...prev, categoryId: String(created.id) }));
+    setNewCategoryName('');
+    setIsCustomCategory(false);
+    setFormError('');
+  };
 
-    // ✅ FIXED FORM STATE
-    const [formData, setFormData] = useState({
-        name: '',
-        sku: '',
-        categoryId: '',
-        quantity: '',
-        price: '',
-        reorderLevel: '',
+  const handleSubmitForm = (e: React.FormEvent) => {
+    e.preventDefault();
+    const quantity = parseInt(formData.quantity, 10);
+    const price = parseFloat(formData.price);
+    if (!formData.name.trim() || !formData.sku.trim() || !formData.categoryId || formData.quantity === '' || formData.price === '') {
+      return setFormError('Please fill in all required fields');
+    }
+    if (Number.isNaN(quantity) || quantity < 0) return setFormError('Quantity must be 0 or more');
+    if (Number.isNaN(price) || price < 0) return setFormError('Price must be 0 or more');
+    if (skuExists(formData.sku)) return setFormError(`SKU “${formData.sku}” is already used by another product`);
+
+    const reorder = parseInt(formData.reorderLevel, 10);
+    addProduct({
+      name: formData.name.trim(),
+      sku: formData.sku.trim(),
+      categoryId: Number(formData.categoryId),
+      quantity,
+      price: Math.round(price * 100) / 100,
+      reorder: Number.isNaN(reorder) ? settings.lowStockThreshold : Math.max(reorder, 0),
     });
+    showToast(`${formData.name} added`, 'success');
+    // Keep the category selected — users often add several items from one category
+    setFormData({ ...emptyForm, categoryId: formData.categoryId });
+    setFormError('');
+  };
 
-    // =========================
-    // INPUT CHANGE
-    // =========================
-    const handleInputChange = (
-        e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
-    ) => {
-        const { name, value } = e.target;
+  const downloadTemplate = () => {
+    const url = URL.createObjectURL(new Blob([TEMPLATE], { type: 'text/csv' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'inventory-template.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
-        if (name === 'categoryId' && value === 'other') {
-            setIsCustomCategory(true);
-            return; // don't set categoryId to "other"
+  const handleCSVUpload = async () => {
+    if (!csvFile) return setCsvError('Please select a CSV file');
+    setCsvReport(null);
+    try {
+      const rows = parseCSV(await csvFile.text());
+      if (rows.length < 2) return setCsvError('The file needs a header row and at least one product row.');
+
+      const headers = rows[0].map(h => h.trim().toLowerCase().replace(/[\s_]/g, ''));
+      const col = (...names: string[]) => headers.findIndex(h => names.includes(h));
+      const idx = {
+        name: col('name', 'productname'),
+        sku: col('sku', 'barcode', 'code'),
+        category: col('category', 'categoryname'),
+        quantity: col('quantity', 'qty', 'stock'),
+        price: col('price', 'sellingprice', 'unitprice'),
+        reorder: col('reorderlevel', 'reorder'),
+      };
+      const missing = (['name', 'sku', 'category', 'quantity'] as const).filter(k => idx[k] === -1);
+      if (missing.length) return setCsvError(`Missing required column(s): ${missing.join(', ')}`);
+
+      let created = 0;
+      let restocked = 0;
+      const skipped: string[] = [];
+
+      rows.slice(1).forEach((r, i) => {
+        const get = (k: keyof typeof idx) => (idx[k] >= 0 ? (r[idx[k]] ?? '').trim() : '');
+        const name = get('name');
+        const sku = get('sku');
+        const quantity = parseInt(get('quantity'), 10);
+        const price = parseFloat(get('price').replace(/[^0-9.\-]/g, ''));
+        const reorder = parseInt(get('reorder'), 10);
+        if (!name || !sku || Number.isNaN(quantity) || quantity < 0) {
+          skipped.push(`row ${i + 2}`);
+          return;
         }
-
-        setFormData(prev => ({ ...prev, [name]: value }));
-    };
-
-    const handleAddCategory = () => {
-        const name = newCategoryName.trim(); // ← was wrongly using formData.categoryId
-
-        if (!name) {
-            setFormError('Please enter a category name');
-            return;
+        const existing = Database.getProducts().find(p => p.sku.toLowerCase() === sku.toLowerCase());
+        if (existing) {
+          // Same SKU: treat the row as a stock delivery
+          Database.updateProduct(existing.id, {
+            quantity: existing.quantity + quantity,
+            ...(Number.isNaN(price) ? {} : { price }),
+          });
+          restocked++;
+          return;
         }
-
-        const exists = categories.some(
-            (c) => c.name.toLowerCase() === name.toLowerCase()
-        );
-
-        if (exists) {
-            setFormError('Category already exists');
-            return;
-        }
-
-        const created = addCategory({ name });
-
-        // Set the dropdown to the newly created category
-        setFormData(prev => ({
-            ...prev,
-            categoryId: String(created.id), // ← auto-select the new category
-        }));
-
-        setNewCategoryName('');       // clear the input
-        setIsCustomCategory(false);   // hide the custom input
-        setFormError('');
-    };
-    // =========================
-    // SUBMIT PRODUCT
-    // =========================
-    const handleSubmitForm = (e: React.FormEvent) => {
-        e.preventDefault();
-
-        if (
-            !formData.name ||
-            !formData.sku ||
-            !formData.categoryId ||
-            !formData.quantity
-        ) {
-            setFormError('Please fill in all required fields');
-            return;
-        }
-
-        addProduct({
-            name: formData.name,
-            sku: formData.sku,
-            categoryId: Number(formData.categoryId), // ✅ IMPORTANT FIX
-            quantity: parseInt(formData.quantity),
-            price: parseFloat(formData.price) || 0,
-            reorder: parseInt(formData.reorderLevel) || 10,
+        const category = Database.addCategory(get('category') || 'Uncategorized');
+        Database.addProduct({
+          name,
+          sku,
+          categoryId: category.id,
+          quantity,
+          price: Number.isNaN(price) ? 0 : Math.round(price * 100) / 100,
+          reorder: Number.isNaN(reorder) ? settings.lowStockThreshold : reorder,
         });
+        created++;
+      });
 
-        showToast(`${formData.name} added successfully!`, 'success');
+      refreshData();
+      if (created + restocked === 0) return setCsvError('No valid product rows were found in the file.');
 
-        // =========================
-        // RESET FORM (FIXED)
-        // =========================
-        setFormData({
-            name: '',
-            sku: '',
-            categoryId: '',
-            quantity: '',
-            price: '',
-            reorderLevel: '',
-        });
+      const report = `${created} new product(s) added, ${restocked} existing SKU(s) restocked${skipped.length ? `, ${skipped.length} skipped (${skipped.slice(0, 5).join(', ')}${skipped.length > 5 ? '…' : ''})` : ''}.`;
+      setCsvReport(report);
+      showToast('CSV imported', 'success');
+      setCsvFile(null);
+      setCsvError('');
+    } catch (err) {
+      setCsvError(err instanceof Error ? err.message : 'Could not read the CSV file. Please check the format.');
+    }
+  };
 
-        setIsCustomCategory(false);
-        setFormError('');
-    };
+  const tabCls = (on: boolean) =>
+    `border-b-2 px-4 pb-4 font-semibold transition-colors ${on ? 'border-[#eb5e28] text-[#eb5e28]' : 'border-transparent text-[#403d39] hover:text-[#252422]'}`;
 
-
-    const handleCSVFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        if (file) {
-            setCsvFile(file);
-            setCsvError('');
+  return (
+    <div className="w-full">
+      <Header
+        title="Add inventory"
+        subtitle="Add products one at a time or import a spreadsheet"
+        actions={
+          <Button variant="ghost" size="sm" onClick={() => router.push('/inventory')}>
+            <ArrowLeft className="h-4 w-4" /> Inventory
+          </Button>
         }
-    };
+      />
 
-    const handleCSVUpload = async () => {
-        if (!csvFile) {
-            setCsvError('Please select a CSV file');
-            return;
-        }
+      <div className="flex justify-center p-4 sm:p-6">
+        <Card className="w-full max-w-4xl">
+          <div className="flex border-b border-[#ccc5b9]/30 px-6 pt-6" role="tablist">
+            <button type="button" role="tab" aria-selected={activeTab === 'form'} onClick={() => setActiveTab('form')} className={tabCls(activeTab === 'form')}>
+              Single product
+            </button>
+            <button type="button" role="tab" aria-selected={activeTab === 'csv'} onClick={() => setActiveTab('csv')} className={tabCls(activeTab === 'csv')}>
+              Import CSV
+            </button>
+          </div>
 
-        try {
-            const text = await csvFile.text();
-            const lines = text.split('\n').filter(line => line.trim());
+          <div className="p-6">
+            {activeTab === 'form' ? (
+              <form onSubmit={handleSubmitForm} className="space-y-4" noValidate>
+                {formError && <div className="rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-700" role="alert">{formError}</div>}
 
-            if (lines.length < 2) {
-                setCsvError('CSV file must contain a header row and at least one data row');
-                return;
-            }
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                  <label className="block">
+                    <span className="mb-2 block text-sm font-semibold text-[#252422]">Product name *</span>
+                    <input type="text" name="name" value={formData.name} onChange={handleInputChange} placeholder="e.g. Cappuccino 12oz" className={inputCls} />
+                  </label>
+                  <label className="block">
+                    <span className="mb-2 block text-sm font-semibold text-[#252422]">SKU / barcode *</span>
+                    <input type="text" name="sku" value={formData.sku} onChange={handleInputChange} placeholder="e.g. CAP-12" className={inputCls} />
+                  </label>
 
-            const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
-            const requiredHeaders = ['name', 'sku', 'category', 'quantity'];
+                  <div>
+                    <span className="mb-2 block text-sm font-semibold text-[#252422]">Category *</span>
+                    {!isCustomCategory ? (
+                      <select name="categoryId" aria-label="Category" value={formData.categoryId} onChange={handleInputChange} className={inputCls}>
+                        <option value="">Select category</option>
+                        {categories.map(cat => (
+                          <option key={cat.id} value={cat.id}>{cat.name}</option>
+                        ))}
+                        <option value="other">+ Add new category</option>
+                      </select>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          aria-label="New category name"
+                          placeholder="Category name"
+                          value={newCategoryName}
+                          onChange={e => setNewCategoryName(e.target.value)}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              handleAddCategory();
+                            }
+                          }}
+                          autoFocus
+                          className={inputCls}
+                        />
+                        <Button size="sm" onClick={handleAddCategory}>Add</Button>
+                        <Button size="sm" variant="ghost" onClick={() => { setIsCustomCategory(false); setNewCategoryName(''); }}>Cancel</Button>
+                      </div>
+                    )}
+                  </div>
 
-            const hasRequiredHeaders = requiredHeaders.every(header =>
-                headers.includes(header)
-            );
-
-            if (!hasRequiredHeaders) {
-                setCsvError(`CSV must have columns: ${requiredHeaders.join(', ')}`);
-                return;
-            }
-
-            let validCount = 0;
-
-            for (let i = 1; i < lines.length; i++) {
-                const values = lines[i].split(',').map(v => v.trim());
-                const product: any = {};
-
-                headers.forEach((header, index) => {
-                    if (header === 'quantity' || header === 'reorderlevel') {
-                        product[header === 'reorderlevel' ? 'reorder' : header] = parseInt(values[index]) || 0;
-                    } else {
-                        product[header] = values[index];
-                    }
-                });
-
-                if (product.name && product.sku && product.category && product.quantity !== undefined) {
-                    addProduct(product);
-                    validCount++;
-                }
-            }
-
-            if (validCount === 0) {
-                setCsvError('No valid products found in CSV');
-                return;
-            }
-
-            showToast(`${validCount} product${validCount > 1 ? 's' : ''} uploaded successfully!`, 'success');
-            setCsvFile(null);
-            setCsvError('');
-        } catch (error) {
-            setCsvError('Error parsing CSV file. Please check the format.');
-        }
-    };
-
-    return (
-        <div className="w-full ">
-            <div className="flex items-center gap-4 p-6 border-b border-[#ccc5b9]/30">
-                <button
-                    onClick={() => router.back()}
-                    className="p-2 hover:bg-[#ccc5b9]/20 rounded transition-colors"
-                >
-                    <ArrowLeft className="w-5 h-5 text-[#252422]" />
-                </button>
-                <div>
-                    <h1 className="text-3xl font-bold text-[#252422]">Add Inventory</h1>
-                    <p className="text-[#403d39]">Add new products to your inventory</p>
+                  <label className="block">
+                    <span className="mb-2 block text-sm font-semibold text-[#252422]">Selling price *</span>
+                    <input type="number" name="price" value={formData.price} onChange={handleInputChange} placeholder="0.00" min="0" step="0.01" inputMode="decimal" className={inputCls} />
+                  </label>
+                  <label className="block">
+                    <span className="mb-2 block text-sm font-semibold text-[#252422]">Opening quantity *</span>
+                    <input type="number" name="quantity" value={formData.quantity} onChange={handleInputChange} placeholder="0" min="0" step="1" inputMode="numeric" className={inputCls} />
+                  </label>
+                  <label className="block">
+                    <span className="mb-2 block text-sm font-semibold text-[#252422]">Reorder level</span>
+                    <input type="number" name="reorderLevel" value={formData.reorderLevel} onChange={handleInputChange} placeholder={String(settings.lowStockThreshold)} min="0" step="1" inputMode="numeric" className={inputCls} />
+                    <span className="mt-1 block text-xs text-[#403d39]/70">You’ll get a low-stock alert at or below this quantity.</span>
+                  </label>
                 </div>
-            </div>
 
-            <div className="p-6 flex justify-center">
-                <Card className="w-full max-w-4xl">
-                    {/* Tabs */}
-                    <div className="flex border-b border-[#ccc5b9]/30 px-6 pt-6">
-                        <button
-                            onClick={() => setActiveTab('form')}
-                            className={`pb-4 px-4 font-semibold transition-colors border-b-2 ${activeTab === 'form'
-                                ? 'text-[#eb5e28] border-[#eb5e28]'
-                                : 'text-[#403d39] border-transparent hover:text-[#252422]'
-                                }`}
-                        >
-                            Add Single Item
-                        </button>
-                        <button
-                            onClick={() => setActiveTab('csv')}
-                            className={`pb-4 px-4 font-semibold transition-colors border-b-2 ${activeTab === 'csv'
-                                ? 'text-[#eb5e28] border-[#eb5e28]'
-                                : 'text-[#403d39] border-transparent hover:text-[#252422]'
-                                }`}
-                        >
-                            Upload CSV
-                        </button>
-                    </div>
+                <div className="flex flex-col gap-3 pt-4 sm:flex-row">
+                  <Button variant="ghost" onClick={() => router.push('/inventory')} className="flex-1">Done</Button>
+                  <Button type="submit" className="flex-1">Add product</Button>
+                </div>
+              </form>
+            ) : (
+              <div className="space-y-4">
+                {csvError && <div className="rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-700" role="alert">{csvError}</div>}
+                {csvReport && <div className="rounded-lg border border-green-300 bg-green-50 p-4 text-sm text-green-800">{csvReport}</div>}
 
-                    {/* Content */}
-                    <div className="p-6">
-                        {activeTab === 'form' ? (
-                            <form onSubmit={handleSubmitForm} className="space-y-4">
-                                {formError && (
-                                    <div className="p-4 bg-red-100 border border-red-300 rounded-lg text-red-700 text-sm">
-                                        {formError}
-                                    </div>
-                                )}
+                <label className="block cursor-pointer rounded-lg border-2 border-dashed border-[#ccc5b9] p-8 text-center transition-colors hover:border-[#eb5e28]">
+                  <Upload className="mx-auto mb-4 h-12 w-12 text-[#eb5e28]" />
+                  <span className="mb-2 block font-semibold text-[#252422]">{csvFile ? csvFile.name : 'Choose a CSV file'}</span>
+                  <span className="block text-sm text-[#403d39]">
+                    Required columns: name, sku, category, quantity. Optional: price, reorderlevel.
+                  </span>
+                  <input
+                    type="file"
+                    accept=".csv,text/csv"
+                    onChange={e => {
+                      setCsvFile(e.target.files?.[0] ?? null);
+                      setCsvError('');
+                      setCsvReport(null);
+                    }}
+                    className="sr-only"
+                  />
+                </label>
 
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    <div>
-                                        <label className="block text-sm font-semibold text-[#252422] mb-2">
-                                            Product Name *
-                                        </label>
-                                        <input
-                                            type="text"
-                                            name="name"
-                                            value={formData.name}
-                                            onChange={handleInputChange}
-                                            placeholder="Enter product name"
-                                            className="w-full px-4 py-2 border border-[#ccc5b9] rounded-lg bg-white text-[#252422] placeholder-[#ccc5b9] focus:outline-none focus:border-[#eb5e28] focus:ring-1 focus:ring-[#eb5e28]"
-                                        />
-                                    </div>
+                <div className="rounded-lg border border-blue-200 bg-blue-50 p-4">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <p className="flex items-center gap-2 text-sm font-semibold text-blue-900">
+                      <FileSpreadsheet className="h-4 w-4" /> Example format
+                    </p>
+                    <Button size="sm" variant="ghost" onClick={downloadTemplate}>
+                      <Download className="h-4 w-4" /> Template
+                    </Button>
+                  </div>
+                  <pre className="overflow-x-auto rounded border border-blue-100 bg-white p-3 text-xs">{TEMPLATE}</pre>
+                  <p className="mt-2 text-xs text-blue-900">
+                    Rows whose SKU already exists add to that product’s stock (useful for deliveries). New categories are created automatically.
+                  </p>
+                </div>
 
-                                    <div>
-                                        <label className="block text-sm font-semibold text-[#252422] mb-2">
-                                            SKU *
-                                        </label>
-                                        <input
-                                            type="text"
-                                            name="sku"
-                                            value={formData.sku}
-                                            onChange={handleInputChange}
-                                            placeholder="e.g., SKU-001"
-                                            className="w-full px-4 py-2 border border-[#ccc5b9] rounded-lg bg-white text-[#252422] placeholder-[#ccc5b9] focus:outline-none focus:border-[#eb5e28] focus:ring-1 focus:ring-[#eb5e28]"
-                                        />
-                                    </div>
-
-                                    <div>
-                                        <label className="block text-sm font-semibold text-[#252422] mb-2">
-                                            Category *
-                                        </label>
-                                        {!isCustomCategory ? (
-                                            <select
-                                                name="categoryId"
-                                                value={formData.categoryId}
-                                                onChange={handleInputChange}
-                                                className="w-full px-4 py-2 border border-[#ccc5b9] rounded-lg bg-white text-[#252422] focus:outline-none focus:border-[#eb5e28] focus:ring-1 focus:ring-[#eb5e28]"
-                                            >
-                                                <option value="">Select Category</option>
-
-                                                {categories.map((cat) => (
-                                                    <option key={cat.id} value={cat.id}>
-                                                        {cat.name}
-                                                    </option>
-                                                ))}
-
-                                                <option value="other">+ Add New Category</option>
-                                            </select>
-                                        ) : (
-                                            <div
-                                                className="flex items-center gap-2">
-                                                <input
-                                                    type="text"
-                                                    placeholder="Enter category name"
-                                                    value={newCategoryName}              // ← was bound to formData.categoryId
-                                                    onChange={(e) => setNewCategoryName(e.target.value)}
-                                                    autoFocus
-                                                    className="w-full px-4 py-2 border border-[#ccc5b9] rounded-lg bg-white text-[#252422] placeholder-[#ccc5b9] focus:outline-none focus:border-[#eb5e28] focus:ring-1 focus:ring-[#eb5e28]"
-                                                />
-                                                <button className="px-4 py-2 bg-[#eb5e28] text-white rounded-lg hover:bg-[#d4501f] focus:outline-none focus:ring-2 focus:ring-[#eb5e28]" type="button" onClick={handleAddCategory}>
-                                                    Add
-                                                </button>
-                                                <button className="px-4 py-2 bg-[#ccc5b9] text-[#252422] rounded-lg hover:bg-[#bbb4a6] focus:outline-none focus:ring-2 focus:ring-[#ccc5b9]" type="button" onClick={() => {
-                                                    setIsCustomCategory(false);
-                                                    setNewCategoryName('');
-                                                }}>
-                                                    Cancel
-                                                </button>
-                                            </div>
-                                        )}
-                                    </div>
-
-                                    <div>
-                                        <label className="block text-sm font-semibold text-[#252422] mb-2">
-                                            Quantity *
-                                        </label>
-                                        <input
-                                            type="number"
-                                            name="quantity"
-                                            value={formData.quantity}
-                                            onChange={handleInputChange}
-                                            placeholder="0"
-                                            min="0"
-                                            className="w-full px-4 py-2 border border-[#ccc5b9] rounded-lg bg-white text-[#252422] placeholder-[#ccc5b9] focus:outline-none focus:border-[#eb5e28] focus:ring-1 focus:ring-[#eb5e28]"
-                                        />
-                                    </div>
-
-                                    <div>
-                                        <label className="block text-sm font-semibold text-[#252422] mb-2">
-                                            Price
-                                        </label>
-                                        <input
-                                            type="number"
-                                            name="price"
-                                            value={formData.price}
-                                            onChange={handleInputChange}
-                                            placeholder="0.00"
-                                            min="0"
-                                            step="0.01"
-                                            className="w-full px-4 py-2 border border-[#ccc5b9] rounded-lg bg-white text-[#252422] placeholder-[#ccc5b9] focus:outline-none focus:border-[#eb5e28] focus:ring-1 focus:ring-[#eb5e28]"
-                                        />
-                                    </div>
-
-                                    <div>
-                                        <label className="block text-sm font-semibold text-[#252422] mb-2">
-                                            Reorder Level
-                                        </label>
-                                        <input
-                                            type="number"
-                                            name="reorderLevel"
-                                            value={formData.reorderLevel}
-                                            onChange={handleInputChange}
-                                            placeholder="10"
-                                            min="0"
-                                            className="w-full px-4 py-2 border border-[#ccc5b9] rounded-lg bg-white text-[#252422] placeholder-[#ccc5b9] focus:outline-none focus:border-[#eb5e28] focus:ring-1 focus:ring-[#eb5e28]"
-                                        />
-                                    </div>
-                                </div>
-
-                                <div className="flex gap-3 pt-6">
-                                    <Button variant="secondary" onClick={() => router.back()} className="flex-1">
-                                        Back
-                                    </Button>
-                                    <Button variant="primary" type="submit" className="flex-1">
-                                        Add Product
-                                    </Button>
-                                </div>
-                            </form>
-                        ) : (
-                            <div className="space-y-4">
-                                {csvError && (
-                                    <div className="p-4 bg-red-100 border border-red-300 rounded-lg text-red-700 text-sm">
-                                        {csvError}
-                                    </div>
-                                )}
-
-                                <div className="border-2 border-dashed border-[#ccc5b9] rounded-lg p-8 text-center">
-                                    <Upload className="w-12 h-12 text-[#eb5e28] mx-auto mb-4" />
-                                    <p className="text-[#252422] font-semibold mb-2">Upload CSV File</p>
-                                    <p className="text-sm text-[#403d39] mb-4">
-                                        Required columns: name, sku, category, quantity
-                                    </p>
-                                    <label>
-                                        <input
-                                            type="file"
-                                            accept=".csv"
-                                            onChange={handleCSVFileChange}
-                                            className="hidden"
-                                        />
-                                        <span className="inline-block px-6 py-2 bg-[#eb5e28]/20 text-[#eb5e28] rounded-lg font-semibold cursor-pointer hover:bg-[#eb5e28]/30 transition-colors">
-                                            Choose File
-                                        </span>
-                                    </label>
-                                </div>
-
-                                {csvFile && (
-                                    <div className="p-4 bg-[#fffcf2] border border-[#ccc5b9] rounded-lg">
-                                        <p className="text-sm text-[#252422] font-semibold">Selected: {csvFile.name}</p>
-                                        <p className="text-xs text-[#403d39]">Size: {(csvFile.size / 1024).toFixed(2)} KB</p>
-                                    </div>
-                                )}
-
-                                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                                    <p className="text-sm text-blue-900 font-semibold mb-2">CSV Format Example:</p>
-                                    <pre className="text-xs bg-white border border-blue-100 p-3 rounded overflow-x-auto">
-                                        {`name,sku,category,quantity
-Wireless Mouse,WM-001,Electronics,150
-USB Cable,USB-001,Accessories,300`}
-                                    </pre>
-                                </div>
-
-                                <div className="flex gap-3 pt-6">
-                                    <Button variant="secondary" onClick={() => router.back()} className="flex-1">
-                                        Back
-                                    </Button>
-                                    <Button
-                                        variant="primary"
-                                        onClick={handleCSVUpload}
-                                        disabled={!csvFile}
-                                        className="flex-1"
-                                    >
-                                        Upload Products
-                                    </Button>
-                                </div>
-                            </div>
-                        )}
-                    </div>
-
-                </Card>
-            </div>
-        </div>
-    );
+                <div className="flex flex-col gap-3 pt-4 sm:flex-row">
+                  <Button variant="ghost" onClick={() => router.push('/inventory')} className="flex-1">Back</Button>
+                  <Button onClick={handleCSVUpload} disabled={!csvFile} className="flex-1">Import products</Button>
+                </div>
+              </div>
+            )}
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
 }

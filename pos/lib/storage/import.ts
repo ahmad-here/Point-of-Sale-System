@@ -25,13 +25,13 @@ export class DataImporter {
   static validateData(data: unknown): data is Omit<ExportedData, 'version'> {
     if (!data || typeof data !== 'object') return false;
 
-    const d = data as any;
+    const d = data as Record<string, unknown>;
     return (
       Array.isArray(d.products) &&
       Array.isArray(d.sales) &&
       Array.isArray(d.payments) &&
       Array.isArray(d.customers) &&
-      d.settings &&
+      !!d.settings &&
       typeof d.settings === 'object'
     );
   }
@@ -163,8 +163,16 @@ export class DataImporter {
           const maxSaleId = Math.max(...currentSales.map(s => s.id), 0);
           const maxCustomerId = Math.max(...currentCustomers.map(c => c.id), 0);
 
+          // Merge categories by name and remap product category IDs
+          const categoryMap = new Map<number, number>();
+          (parsed.categories || []).forEach(cat => {
+            const merged = Database.addCategory(cat.name);
+            categoryMap.set(cat.id, merged.id);
+          });
+
           const adjustedProducts = parsed.products.map((p, idx) => ({
             ...p,
+            categoryId: categoryMap.get(p.categoryId) ?? p.categoryId,
             id: maxProductId + idx + 1,
           }));
 
@@ -219,7 +227,7 @@ export class DataImporter {
   /**
    * Get import preview from file
    */
-  static async getFilePreview(file: File): Promise<{ success: boolean; preview?: any; error?: string }> {
+  static async getFilePreview(file: File): Promise<{ success: boolean; preview?: Record<string, unknown>; error?: string }> {
     return new Promise((resolve) => {
       const reader = new FileReader();
 
